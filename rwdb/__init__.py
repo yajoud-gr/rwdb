@@ -39,7 +39,7 @@ import logging
 
 import bson
 import bson.errors
-from motor import MotorClient
+from motor.motor_tornado import MotorClient
 import pymongo.read_preferences
 
 import rw
@@ -70,9 +70,9 @@ class Cursor(object):
 
     @gen.coroutine
     def next(self):
-        ret = yield self.db_cursor.fetch_next
+        ret = yield self.db_cursor.to_list(length=1)
         if ret:
-            raise gen.Return(self.col_cls(**self.db_cursor.next_object()))
+            raise gen.Return(self.col_cls(**ret[0]))
         else:
             raise gen.Return(None)
 
@@ -153,7 +153,10 @@ class Query(object):
     @gen.coroutine
     def count(self):
         col = self.get_collection()
-        ret = yield col.find(self._filters, sort=self._sort, skip=self._skip, limit=self._limit).count()
+        count_kwargs = {'skip': self._skip}
+        if self._limit and self._limit > 0:
+            count_kwargs['limit'] = self._limit
+        ret = yield col.count_documents(self._filters, **count_kwargs)
         raise gen.Return(ret)
 
     @gen.coroutine
@@ -165,7 +168,10 @@ class Query(object):
             filters.update(args[0])
             # if len(args) > 1:
                 # self._fields = args[1]
-        ret = yield col.find_one(filters, sort=self._sort, skip=self._skip, limit=self._limit)
+        find_one_kwargs = {'sort': self._sort, 'skip': self._skip}
+        if self._limit and self._limit > 0:
+            find_one_kwargs['limit'] = self._limit
+        ret = yield col.find_one(filters, **find_one_kwargs)
         if ret:
             raise gen.Return(self.col_cls(**ret))
         else:
@@ -346,11 +352,12 @@ class Document(DocumentBase):
         """Save entry in collection (updates or creates)
 
         returns Future"""
-        ret = yield self.get_collection().insert(self)
+        ret = yield self.get_collection().insert_one(dict(self))
         # creating a new entry without an _id MongoDB will
         # generate an id in ObjectId format.
-        if not '_id' in self and isinstance(ret, bson.ObjectId):
-            self['_id'] = ret
+        if not '_id' in self:
+            self['_id'] = ret.inserted_id
+        ret = self['_id']
         raise gen.Return(ret)
 
     @gen.coroutine
@@ -359,14 +366,16 @@ class Document(DocumentBase):
 
         returns Future"""
         if upsert and '_id' not in self:
-            ret = yield self.get_collection().insert(self)
+            ret = yield self.get_collection().insert_one(dict(self))
+            self['_id'] = ret.inserted_id
+            ret = self['_id']
         else:
-            ret = yield self.get_collection().update({'_id': self['_id']}, self, upsert=upsert)
+            ret = yield self.get_collection().replace_one({'_id': self['_id']}, dict(self), upsert=upsert)
         raise gen.Return(ret)
 
     @gen.coroutine
     def remove(self):
-        ret = yield self.get_collection().remove({'_id': self['_id']})
+        ret = yield self.get_collection().delete_one({'_id': self['_id']})
         raise gen.Return(ret)
 
     @classmethod
@@ -458,10 +467,16 @@ def connect(cfg):
         args['host'] = cfg.get('host', 'localhost')
         args['port'] = int(cfg.get('port', 27017))
 
+    if cfg.get('user'):
+        args['username'] = cfg['user']
+        args['password'] = cfg.get('password')
+        if cfg.get('auth_source'):
+            args['authSource'] = cfg['auth_source']
+        elif cfg.get('db'):
+            args['authSource'] = cfg['db']
+
     client = MotorClient(**args)
 
-    if cfg.get('user'):
-        yield client[cfg['db']].authenticate(cfg['user'], cfg['password'])
     if cfg.get('read_preference'):
         read_preference = cfg['read_preference'].upper()
         client.read_preference = getattr(pymongo.read_preferences.ReadPreference, read_preference)
