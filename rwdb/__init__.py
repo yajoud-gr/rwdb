@@ -373,8 +373,10 @@ class Document(DocumentBase):
             self['_id'] = ret.inserted_id
             ret = self['_id']
         else:
-            # use replace_one because we replace the whole record with the complete document
-            ret = yield self.get_collection().replace_one({'_id': self['_id']}, self, upsert=upsert)
+            # $set can not include _id, so copy and drop it
+            changes = dict(self)
+            del changes['_id']
+            ret = yield self.get_collection().update_one({'_id': self['_id']}, {'$set': changes}, upsert=upsert)
         raise gen.Return(ret)
 
     @gen.coroutine
