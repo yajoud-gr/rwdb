@@ -70,6 +70,7 @@ class Cursor(object):
 
     @gen.coroutine
     def next(self):
+        # fetch the next document with to_list, 'async for' would need an async def
         ret = yield self.db_cursor.to_list(length=1)
         if ret:
             raise gen.Return(self.col_cls(**ret[0]))
@@ -154,6 +155,7 @@ class Query(object):
     def count(self):
         col = self.get_collection()
         count_kwargs = {'skip': self._skip}
+        # 0 means no limit and count_documents rejects 0, so only pass a real limit
         if self._limit and self._limit > 0:
             count_kwargs['limit'] = self._limit
         ret = yield col.count_documents(self._filters, **count_kwargs)
@@ -169,6 +171,7 @@ class Query(object):
             # if len(args) > 1:
                 # self._fields = args[1]
         find_one_kwargs = {'sort': self._sort, 'skip': self._skip}
+        # 0 means basically no limit, so only pass a real limit
         if self._limit and self._limit > 0:
             find_one_kwargs['limit'] = self._limit
         ret = yield col.find_one(filters, **find_one_kwargs)
@@ -352,7 +355,7 @@ class Document(DocumentBase):
         """Save entry in collection (updates or creates)
 
         returns Future"""
-        ret = yield self.get_collection().insert_one(dict(self))
+        ret = yield self.get_collection().insert_one(self)
         # creating a new entry without an _id MongoDB will
         # generate an id in ObjectId format.
         if not '_id' in self:
@@ -366,11 +369,12 @@ class Document(DocumentBase):
 
         returns Future"""
         if upsert and '_id' not in self:
-            ret = yield self.get_collection().insert_one(dict(self))
+            ret = yield self.get_collection().insert_one(self)
             self['_id'] = ret.inserted_id
             ret = self['_id']
         else:
-            ret = yield self.get_collection().replace_one({'_id': self['_id']}, dict(self), upsert=upsert)
+            # use replace_one because we replace the whole record with the complete document
+            ret = yield self.get_collection().replace_one({'_id': self['_id']}, self, upsert=upsert)
         raise gen.Return(ret)
 
     @gen.coroutine
